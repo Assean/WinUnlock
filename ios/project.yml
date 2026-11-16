@@ -13,11 +13,12 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sean.WinUnlock
         INFOPLIST_KEY_CFBundleDisplayName: "WinUnlock"
-        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "用於靠近 Windows 筆電時自動感應並進行安全解鎖"
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "用於靠近 Windows 筆電時在背景自動偵測連線並解鎖"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         GENERATE_INFOPLIST_FILE: YES
     info:
       path: Info.plist
       properties:
         UIBackgroundModes:
+          - bluetooth-central
           - bluetooth-peripheral

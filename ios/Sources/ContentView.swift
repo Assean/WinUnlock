@@ -8,13 +8,13 @@ struct ContentView: View {
             Color(.systemGroupedBackground).ignoresSafeArea()
 
             VStack(spacing: 24) {
-                Image(systemName: bleManager.isAdvertising ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                Image(systemName: bleManager.isScanning ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
                     .font(.system(size: 56))
-                    .foregroundStyle(bleManager.isAdvertising ? .blue : .secondary)
-                    .symbolEffect(.variableColor.iterative, isActive: bleManager.isAdvertising)
+                    .foregroundStyle(bleManager.isScanning ? .blue : .secondary)
+                    .symbolEffect(.variableColor.iterative, isActive: bleManager.isScanning)
 
                 VStack(spacing: 8) {
-                    Text("WinUnlock 藍牙鑰匙")
+                    Text("WinUnlock 背景藍牙鑰匙")
                         .font(.title2.bold())
                     Text(bleManager.statusText)
                         .font(.subheadline)
@@ -23,12 +23,17 @@ struct ContentView: View {
                         .padding(.horizontal)
                 }
 
+                Toggle("靠近時在背景全自動解鎖", isOn: $bleManager.autoBackgroundUnlock)
+                    .padding()
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.horizontal, 24)
+
                 Button("預覽 AirPods 風格解鎖卡片") {
                     bleManager.isUnlocked = false
                     bleManager.showUnlockSheet = true
                 }
                 .buttonStyle(.bordered)
-                .padding(.top, 12)
             }
         }
         .sheet(isPresented: $bleManager.showUnlockSheet) {
