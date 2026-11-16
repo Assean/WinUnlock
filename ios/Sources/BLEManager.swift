@@ -12,27 +12,40 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     private var centralManager: CBCentralManager!
     private var targetPeripheral: CBPeripheral?
+    private var lastDiscoveredPeripheral: CBPeripheral?
     private var tokenCharacteristic: CBCharacteristic?
 
     private var isConnecting = false
     private var lastUnlockTime: Date = .distantPast
-    private let cooldownSeconds: TimeInterval = 15.0
-    private let rssiThreshold: Int = -62
+    private let cooldownSeconds: TimeInterval = 12.0
+    private let rssiThreshold: Int = -75
 
     @Published var isScanning: Bool = false
     @Published var showUnlockSheet: Bool = false
     @Published var isUnlocked: Bool = false
     @Published var autoBackgroundUnlock: Bool = true
     @Published var statusText: String = "正在初始化背景藍牙偵測..."
+    @Published var detectedInfo: String = "尚未偵測到筆電信標"
 
     override init() {
         super.init()
         setupNotifications()
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+
         centralManager = CBCentralManager(
             delegate: self,
             queue: nil,
             options: [CBCentralManagerOptionRestoreIdentifierKey: restoreID]
         )
+    }
+
+    @objc private func appDidEnterBackground() {
+        startScan(allowDuplicates: false)
+    }
+
+    @objc private func appWillEnterForeground() {
+        startScan(allowDuplicates: true)
     }
 
     private func setupNotifications() {
@@ -41,7 +54,6 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
 
-    // iOS 在背景或鎖屏偵測到筆電並喚醒 App 時呼叫
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
            let first = peripherals.first {
@@ -56,38 +68,60 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
-            startBackgroundScan()
+            let isForeground = UIApplication.shared.applicationState == .active
+            startScan(allowDuplicates: isForeground)
         } else {
             isScanning = false
             statusText = "請開啟 iPhone 藍牙以啟用背景自動解鎖"
         }
     }
 
-    func startBackgroundScan() {
+    func startScan(allowDuplicates: Bool) {
         guard centralManager.state == .poweredOn else { return }
-        // allowDuplicates: false 讓 iOS 硬體晶片在背景每次筆電進入範圍時主動喚醒 App
+        centralManager.stopScan()
         centralManager.scanForPeripherals(
             withServices: [serviceUUID],
-            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates]
         )
         DispatchQueue.main.async {
             self.isScanning = true
-            self.statusText = "背景偵測中（離開 App 或鎖屏仍會自動連線）"
+            self.statusText = "偵測中（觸發門檻: \(self.rssiThreshold) dBm）"
         }
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
         let rssiVal = RSSI.intValue
-        guard rssiVal != 127, rssiVal >= rssiThreshold else { return }
+        guard rssiVal != 127 else { return }
+        self.lastDiscoveredPeripheral = peripheral
+
+        DispatchQueue.main.async {
+            self.detectedInfo = "已偵測到筆電信標（訊號：\(rssiVal) dBm）"
+        }
+
+        guard rssiVal >= rssiThreshold else { return }
         guard !isConnecting, Date().timeIntervalSince(lastUnlockTime) > cooldownSeconds else { return }
 
+        connectToPeripheral(peripheral)
+    }
+
+    func manualConnectAndUnlock() {
+        guard let p = lastDiscoveredPeripheral else {
+            DispatchQueue.main.async {
+                self.detectedInfo = "目前尚未掃描到筆電，請確認電腦端已啟動廣播"
+            }
+            return
+        }
+        connectToPeripheral(p)
+    }
+
+    private func connectToPeripheral(_ peripheral: CBPeripheral) {
         isConnecting = true
         targetPeripheral = peripheral
         peripheral.delegate = self
         centralManager.stopScan()
 
         DispatchQueue.main.async {
-            self.statusText = "偵測到筆電靠近 (\(rssiVal) dBm)，自動連線中..."
+            self.statusText = "正在連線至 Windows 筆電..."
         }
         centralManager.connect(peripheral, options: nil)
     }
@@ -154,7 +188,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             let notifyGen = UINotificationFeedbackGenerator()
             notifyGen.notificationOccurred(.success)
             self.isUnlocked = true
-            self.statusText = "已自動感應並解鎖 Windows 筆電"
+            self.statusText = "已成功感應並解鎖 Windows 筆電"
             self.sendUnlockedNotification()
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -185,7 +219,8 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         targetPeripheral = nil
         tokenCharacteristic = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.startBackgroundScan()
+            let isForeground = UIApplication.shared.applicationState == .active
+            self.startScan(allowDuplicates: isForeground)
         }
     }
 }

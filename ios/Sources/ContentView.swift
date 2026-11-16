@@ -7,20 +7,22 @@ struct ContentView: View {
         ZStack {
             Color(.systemGroupedBackground).ignoresSafeArea()
 
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
                 Image(systemName: bleManager.isScanning ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-                    .font(.system(size: 56))
+                    .font(.system(size: 54))
                     .foregroundStyle(bleManager.isScanning ? .blue : .secondary)
                     .symbolEffect(.variableColor.iterative, isActive: bleManager.isScanning)
 
-                VStack(spacing: 8) {
+                VStack(spacing: 6) {
                     Text("WinUnlock 背景藍牙鑰匙")
                         .font(.title2.bold())
                     Text(bleManager.statusText)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+                    Text(bleManager.detectedInfo)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.blue)
+                        .padding(.top, 4)
                 }
 
                 Toggle("靠近時在背景全自動解鎖", isOn: $bleManager.autoBackgroundUnlock)
@@ -28,6 +30,11 @@ struct ContentView: View {
                     .background(Color(.secondarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .padding(.horizontal, 24)
+
+                Button("立即連線並測試解鎖") {
+                    bleManager.manualConnectAndUnlock()
+                }
+                .buttonStyle(.borderedProminent)
 
                 Button("預覽 AirPods 風格解鎖卡片") {
                     bleManager.isUnlocked = false
