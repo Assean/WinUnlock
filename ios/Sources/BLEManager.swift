@@ -1,17 +1,19 @@
 ﻿import Foundation
 import CoreBluetooth
+import CoreLocation
 import CryptoKit
 import UIKit
 import UserNotifications
 
-final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate, UNUserNotificationCenterDelegate {
-    // 改用 16-bit UUID，確保 Windows 將其放入 Primary ADV（鎖屏被動掃描唯一讀取的封包）
+final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate, CLLocationManagerDelegate, UNUserNotificationCenterDelegate {
     private let serviceUUID   = CBUUID(string: "FFF0")
     private let tokenCharUUID = CBUUID(string: "FFF1")
+    private let beaconUUID    = UUID(uuidString: "A1B2C3D4-E5F6-4789-8012-3456789ABCDE")!
     private let secretKey     = "MySuperSecretUnlockKey_2026"
-    private let restoreID     = "com.sean.WinUnlock.central.v6"
+    private let restoreID     = "com.sean.WinUnlock.central.v7"
 
     private var centralManager: CBCentralManager!
+    private let locationManager = CLLocationManager()
     private var targetPeripheral: CBPeripheral?
     private var lastDiscoveredPeripheral: CBPeripheral?
     private var tokenCharacteristic: CBCharacteristic?
@@ -21,19 +23,21 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var lastUnlockTime: Date = .distantPast
     private let cooldownSeconds: TimeInterval = 12.0
     private let foregroundRssiThreshold: Int = -75
-    private let backgroundRssiThreshold: Int = -88
+    private let backgroundRssiThreshold: Int = -90
 
     @Published var isScanning: Bool = false
     @Published var showUnlockSheet: Bool = false
     @Published var isUnlocked: Bool = false
     @Published var autoBackgroundUnlock: Bool = true
-    @Published var statusText: String = "正在初始化背景藍牙偵測..."
+    @Published var statusText: String = "正在初始化 iBeacon 鎖屏感應..."
     @Published var detectedInfo: String = "尚未偵測到筆電信標"
     @Published var eventLogs: [String] = []
 
     override init() {
         super.init()
         setupNotifications()
+        setupBeaconMonitoring()
+
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
 
@@ -42,6 +46,48 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             queue: nil,
             options: [CBCentralManagerOptionRestoreIdentifierKey: restoreID]
         )
+    }
+
+    private func setupBeaconMonitoring() {
+        locationManager.delegate = self
+        locationManager.requestAlwaysAuthorization()
+
+        let region = CLBeaconRegion(uuid: beaconUUID, identifier: "WinUnlockBeacon")
+        region.notifyOnEntry = true
+        region.notifyOnExit = true
+        region.notifyEntryStateOnDisplay = true
+        locationManager.startMonitoring(for: region)
+        locationManager.requestState(for: region)
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        if status == .authorizedAlways || status == .authorizedWhenInUse {
+            let region = CLBeaconRegion(uuid: beaconUUID, identifier: "WinUnlockBeacon")
+            region.notifyEntryStateOnDisplay = true
+            locationManager.startMonitoring(for: region)
+            locationManager.requestState(for: region)
+        }
+    }
+
+    // iPhone 在黑屏鎖定或螢幕亮起時，只要靠近筆電 iBeacon 就會被硬體瞬間喚醒
+    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        addLog("iBeacon 硬體喚醒：進入筆電感應範圍！")
+        triggerActiveWakeScan()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
+        if state == .inside {
+            addLog("iBeacon 狀態確認：位於筆電旁，啟動連線")
+            triggerActiveWakeScan()
+        }
+    }
+
+    private func triggerActiveWakeScan() {
+        guard centralManager.state == .poweredOn else { return }
+        guard !isConnecting, Date().timeIntervalSince(lastUnlockTime) > cooldownSeconds else { return }
+        // 取得約 10 秒背景執行權限後，立即開啟主動掃描抓取 FFF0 並連線
+        startScan(allowDuplicates: true)
     }
 
     private func addLog(_ message: String) {
@@ -57,12 +103,12 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     @objc private func appDidEnterBackground() {
-        addLog("進入背景／鎖屏模式，切換被動掃描")
+        addLog("進入鎖屏／背景，iBeacon 硬體監聽待機中")
         startScan(allowDuplicates: false)
     }
 
     @objc private func appWillEnterForeground() {
-        addLog("回到前台模式，切換即時掃描")
+        addLog("回到前台模式")
         startScan(allowDuplicates: true)
     }
 
@@ -73,15 +119,11 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
-        addLog("系統於背景喚醒 WinUnlock")
+        addLog("CoreBluetooth 背景狀態還原")
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
            let first = peripherals.first {
             self.targetPeripheral = first
             first.delegate = self
-        }
-        DispatchQueue.main.async {
-            self.isScanning = true
-            self.statusText = "背景自動感應運行中"
         }
     }
 
@@ -91,7 +133,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             startScan(allowDuplicates: isForeground)
         } else {
             isScanning = false
-            statusText = "請開啟 iPhone 藍牙以啟用背景自動解鎖"
+            statusText = "請開啟 iPhone 藍牙以啟用鎖屏解鎖"
         }
     }
 
@@ -104,7 +146,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         )
         DispatchQueue.main.async {
             self.isScanning = true
-            self.statusText = "偵測中（主封包 FFF0 監聽中）"
+            self.statusText = "iBeacon + BLE 雙引擎監聽中"
         }
     }
 
@@ -125,7 +167,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         guard rssiVal >= threshold else { return }
         guard !isConnecting, Date().timeIntervalSince(lastUnlockTime) > cooldownSeconds else { return }
 
-        addLog("\(isBackground ? "鎖屏/背景" : "前台")發現筆電 (\(rssiVal) dBm)，開始連線")
+        addLog("\(isBackground ? "鎖屏喚醒" : "前台")連線筆電 (\(rssiVal) dBm)")
         connectToPeripheral(peripheral)
     }
 
@@ -150,11 +192,10 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             self.statusText = "正在連線至 Windows 筆電..."
         }
 
-        // 8 秒連線逾時保護，避免 MAC 位址切換時卡死
         connectTimeoutWorkItem?.cancel()
         let timeoutItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.isConnecting else { return }
-            self.addLog("連線逾時，重置並恢復掃描")
+            self.addLog("連線逾時，重置掃描")
             self.disconnectAndCooldown()
         }
         connectTimeoutWorkItem = timeoutItem
