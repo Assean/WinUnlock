@@ -7,11 +7,12 @@ struct ContentView: View {
         ZStack {
             Color(.systemGroupedBackground).ignoresSafeArea()
 
-            VStack(spacing: 20) {
+            VStack(spacing: 16) {
                 Image(systemName: bleManager.isScanning ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-                    .font(.system(size: 54))
+                    .font(.system(size: 48))
                     .foregroundStyle(bleManager.isScanning ? .blue : .secondary)
                     .symbolEffect(.variableColor.iterative, isActive: bleManager.isScanning)
+                    .padding(.top, 12)
 
                 VStack(spacing: 6) {
                     Text("WinUnlock 背景藍牙鑰匙")
@@ -22,25 +23,54 @@ struct ContentView: View {
                     Text(bleManager.detectedInfo)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.blue)
-                        .padding(.top, 4)
+                        .padding(.top, 2)
                 }
 
-                Toggle("靠近時在背景全自動解鎖", isOn: $bleManager.autoBackgroundUnlock)
+                Toggle("靠近時在背景／鎖屏全自動解鎖", isOn: $bleManager.autoBackgroundUnlock)
                     .padding()
                     .background(Color(.secondarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .padding(.horizontal, 24)
 
-                Button("立即連線並測試解鎖") {
-                    bleManager.manualConnectAndUnlock()
-                }
-                .buttonStyle(.borderedProminent)
+                HStack(spacing: 12) {
+                    Button("立即連線測試") {
+                        bleManager.manualConnectAndUnlock()
+                    }
+                    .buttonStyle(.borderedProminent)
 
-                Button("預覽 AirPods 風格解鎖卡片") {
-                    bleManager.isUnlocked = false
-                    bleManager.showUnlockSheet = true
+                    Button("預覽卡片") {
+                        bleManager.isUnlocked = false
+                        bleManager.showUnlockSheet = true
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("背景連線紀錄")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if bleManager.eventLogs.isEmpty {
+                                Text("尚無紀錄，鎖屏後重啟電腦廣播即可觀察...")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            } else {
+                                ForEach(bleManager.eventLogs, id: \.self) { log in
+                                    Text(log)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.primary)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 110)
+                    .padding(10)
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .padding(.horizontal, 24)
             }
         }
         .sheet(isPresented: $bleManager.showUnlockSheet) {

@@ -5,24 +5,23 @@ import UIKit
 import UserNotifications
 
 final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate, UNUserNotificationCenterDelegate {
-    private let serviceUUID   = CBUUID(string: "A1B2C3D4-E5F6-4789-8012-3456789ABCDE")
-    private let tokenCharUUID = CBUUID(string: "A1B2C3D4-E5F6-4789-8012-3456789ABCE0")
+    // 改用 16-bit UUID，確保 Windows 將其放入 Primary ADV（鎖屏被動掃描唯一讀取的封包）
+    private let serviceUUID   = CBUUID(string: "FFF0")
+    private let tokenCharUUID = CBUUID(string: "FFF1")
     private let secretKey     = "MySuperSecretUnlockKey_2026"
-    private let restoreID     = "com.sean.WinUnlock.central"
+    private let restoreID     = "com.sean.WinUnlock.central.v6"
 
     private var centralManager: CBCentralManager!
     private var targetPeripheral: CBPeripheral?
     private var lastDiscoveredPeripheral: CBPeripheral?
     private var tokenCharacteristic: CBCharacteristic?
+    private var connectTimeoutWorkItem: DispatchWorkItem?
 
     private var isConnecting = false
-    private var shouldCheckRssiAfterConnect = false
-    private var rssiRetryCount = 0
-    private let maxRssiRetries = 15
-
     private var lastUnlockTime: Date = .distantPast
     private let cooldownSeconds: TimeInterval = 12.0
-    private let rssiThreshold: Int = -75
+    private let foregroundRssiThreshold: Int = -75
+    private let backgroundRssiThreshold: Int = -88
 
     @Published var isScanning: Bool = false
     @Published var showUnlockSheet: Bool = false
@@ -30,6 +29,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     @Published var autoBackgroundUnlock: Bool = true
     @Published var statusText: String = "正在初始化背景藍牙偵測..."
     @Published var detectedInfo: String = "尚未偵測到筆電信標"
+    @Published var eventLogs: [String] = []
 
     override init() {
         super.init()
@@ -44,11 +44,25 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         )
     }
 
+    private func addLog(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let entry = "[\(formatter.string(from: Date()))] \(message)"
+        DispatchQueue.main.async {
+            self.eventLogs.insert(entry, at: 0)
+            if self.eventLogs.count > 8 {
+                self.eventLogs.removeLast()
+            }
+        }
+    }
+
     @objc private func appDidEnterBackground() {
+        addLog("進入背景／鎖屏模式，切換被動掃描")
         startScan(allowDuplicates: false)
     }
 
     @objc private func appWillEnterForeground() {
+        addLog("回到前台模式，切換即時掃描")
         startScan(allowDuplicates: true)
     }
 
@@ -59,6 +73,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        addLog("系統於背景喚醒 WinUnlock")
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
            let first = peripherals.first {
             self.targetPeripheral = first
@@ -89,7 +104,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         )
         DispatchQueue.main.async {
             self.isScanning = true
-            self.statusText = "偵測中（觸發門檻: \(self.rssiThreshold) dBm）"
+            self.statusText = "偵測中（主封包 FFF0 監聽中）"
         }
     }
 
@@ -99,17 +114,19 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         self.lastDiscoveredPeripheral = peripheral
 
         let isBackground = UIApplication.shared.applicationState != .active
+        let threshold = isBackground ? backgroundRssiThreshold : foregroundRssiThreshold
+
         if !isBackground {
             DispatchQueue.main.async {
                 self.detectedInfo = "已偵測到筆電信標（訊號：\(rssiVal) dBm）"
             }
-            // 前台連續掃描時，直接在發現階段過濾距離
-            guard rssiVal >= rssiThreshold else { return }
         }
 
-        // 背景／鎖屏狀態下因 iOS 只觸發一次 didDiscover，必須直接連線後再透過 readRSSI 測距
+        guard rssiVal >= threshold else { return }
         guard !isConnecting, Date().timeIntervalSince(lastUnlockTime) > cooldownSeconds else { return }
-        connectToPeripheral(peripheral, checkRssiAfterConnect: isBackground)
+
+        addLog("\(isBackground ? "鎖屏/背景" : "前台")發現筆電 (\(rssiVal) dBm)，開始連線")
+        connectToPeripheral(peripheral)
     }
 
     func manualConnectAndUnlock() {
@@ -119,12 +136,12 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             return
         }
-        connectToPeripheral(p, checkRssiAfterConnect: false)
+        addLog("手動觸發連線測試")
+        connectToPeripheral(p)
     }
 
-    private func connectToPeripheral(_ peripheral: CBPeripheral, checkRssiAfterConnect: Bool) {
+    private func connectToPeripheral(_ peripheral: CBPeripheral) {
         isConnecting = true
-        shouldCheckRssiAfterConnect = checkRssiAfterConnect
         targetPeripheral = peripheral
         peripheral.delegate = self
         centralManager.stopScan()
@@ -132,18 +149,33 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         DispatchQueue.main.async {
             self.statusText = "正在連線至 Windows 筆電..."
         }
+
+        // 8 秒連線逾時保護，避免 MAC 位址切換時卡死
+        connectTimeoutWorkItem?.cancel()
+        let timeoutItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isConnecting else { return }
+            self.addLog("連線逾時，重置並恢復掃描")
+            self.disconnectAndCooldown()
+        }
+        connectTimeoutWorkItem = timeoutItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: timeoutItem)
+
         centralManager.connect(peripheral, options: nil)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        connectTimeoutWorkItem?.cancel()
         peripheral.discoverServices([serviceUUID])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        connectTimeoutWorkItem?.cancel()
+        addLog("連線失敗: \(error?.localizedDescription ?? "未知原因")")
         resetAndRescan()
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        connectTimeoutWorkItem?.cancel()
         resetAndRescan()
     }
 
@@ -164,41 +196,16 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         for char in chars where char.uuid == tokenCharUUID {
             self.tokenCharacteristic = char
-            if self.shouldCheckRssiAfterConnect {
-                self.rssiRetryCount = 0
-                peripheral.readRSSI()
-            } else {
-                DispatchQueue.main.async {
-                    if self.autoBackgroundUnlock || UIApplication.shared.applicationState != .active {
-                        self.sendUnlockCommand()
-                    } else {
-                        let gen = UIImpactFeedbackGenerator(style: .medium)
-                        gen.impactOccurred()
-                        self.isUnlocked = false
-                        self.showUnlockSheet = true
-                    }
+            DispatchQueue.main.async {
+                if self.autoBackgroundUnlock || UIApplication.shared.applicationState != .active {
+                    self.sendUnlockCommand()
+                } else {
+                    let gen = UIImpactFeedbackGenerator(style: .medium)
+                    gen.impactOccurred()
+                    self.isUnlocked = false
+                    self.showUnlockSheet = true
                 }
             }
-        }
-    }
-
-    // 連線後在背景持續讀取即時訊號強度，達標即自動解鎖
-    func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
-        guard error == nil else {
-            disconnectAndCooldown()
-            return
-        }
-        let currentRssi = RSSI.intValue
-        if currentRssi != 127 && currentRssi >= rssiThreshold {
-            sendUnlockCommand()
-        } else if rssiRetryCount < maxRssiRetries {
-            rssiRetryCount += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self = self, self.targetPeripheral?.state == .connected else { return }
-                peripheral.readRSSI()
-            }
-        } else {
-            disconnectAndCooldown()
         }
     }
 
@@ -218,6 +225,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         lastUnlockTime = Date()
+        addLog("已成功寫入加密解鎖簽章！")
         DispatchQueue.main.async {
             let notifyGen = UINotificationFeedbackGenerator()
             notifyGen.notificationOccurred(.success)
@@ -235,7 +243,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private func sendUnlockedNotification() {
         let content = UNMutableNotificationContent()
         content.title = "Sean 的 Windows 筆電"
-        content.body = "已在背景自動感應並完成安全解鎖"
+        content.body = "已在鎖屏／背景自動感應並完成安全解鎖"
         content.sound = .default
         let req = UNNotificationRequest(identifier: "WinUnlockSuccess", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
@@ -250,7 +258,6 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     private func resetAndRescan() {
         isConnecting = false
-        shouldCheckRssiAfterConnect = false
         targetPeripheral = nil
         tokenCharacteristic = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
