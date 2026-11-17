@@ -1,0 +1,352 @@
+﻿=== [1] Windows 蝡舐?撘Ⅳ???炎??===
+- win_unlock_server.py: 95 銵?| 隤?OK
+- winlogon_helper.py: 141 銵?| 隤?OK
+- system_launcher.py: 34 銵?| 隤?OK
+- 58923 SYSTEM 隞??: [OK] ??銝?
+
+--- winlogon_helper.log (???8 銵? ---
+2026-11-17 19:55:18,938 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:55:37,082 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:55:50,645 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:56:03,418 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:56:16,889 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:56:30,094 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:59:14,469 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:59:51,247 - [Helper] Unlock result: SKIP:ALREADY_UNLOCKED(Default)
+
+--- server.log (???8 銵? ---
+2026-11-17 19:55:50,645 - ?? [??閫貊] 蝪賜??? ??隞???: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:56:03,419 - ?? [??閫貊] 蝪賜??? ??隞???: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:56:16,890 - ?? [??閫貊] 蝪賜??? ??隞???: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:56:30,094 - ?? [??閫貊] 蝪賜??? ??隞???: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:59:11,312 - ? ???誨?剖???(撌脤???10 蝘???瑕?????
+2026-11-17 19:59:14,471 - ?? [??閫貊] 蝪賜??? ??隞???: SKIP:ALREADY_UNLOCKED(Default)
+2026-11-17 19:59:24,437 - ? ???誨?剖???(撌脤???10 蝘???瑕?????
+2026-11-17 19:59:51,249 - ?? [??閫貊] 蝪賜??? ??隞???: SKIP:ALREADY_UNLOCKED(Default)
+
+=== [2] iOS 蝡?Swift 蝔?蝣潸?????摩瑼Ｘ ===
+- Service UUID (fff0): [OK]
+- Char UUID (fff1): [OK]
+- iBeacon UUID: [OK]
+- ?梁?銝?? [OK]
+- 撖怠敺蜓?蝺?(cancelPeripheralConnection): [OK]
+- ??????(RestoreIdentifier): [OK]
+- RSSI 頝?瑼駁?瞈? [OK]
+
+--- BLEManager.swift 摰?批捆 ---
+嚜磨mport Foundation
+import CoreBluetooth
+import CoreLocation
+import CryptoKit
+import UIKit
+import UserNotifications
+
+final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate, CLLocationManagerDelegate, UNUserNotificationCenterDelegate {
+    private let serviceUUID   = CBUUID(string: "FFF0")
+    private let tokenCharUUID = CBUUID(string: "FFF1")
+    private let beaconUUID    = UUID(uuidString: "A1B2C3D4-E5F6-4789-8012-3456789ABCDE")!
+    private let secretKey     = "MySuperSecretUnlockKey_2026"
+    private let restoreID     = "com.sean.WinUnlock.central.v7"
+
+    private var centralManager: CBCentralManager!
+    private let locationManager = CLLocationManager()
+    private var targetPeripheral: CBPeripheral?
+    private var lastDiscoveredPeripheral: CBPeripheral?
+    private var tokenCharacteristic: CBCharacteristic?
+    private var connectTimeoutWorkItem: DispatchWorkItem?
+
+    private var isConnecting = false
+    private var lastUnlockTime: Date = .distantPast
+    private let cooldownSeconds: TimeInterval = 12.0
+    private let foregroundRssiThreshold: Int = -75
+    private let backgroundRssiThreshold: Int = -90
+
+    @Published var isScanning: Bool = false
+    @Published var showUnlockSheet: Bool = false
+    @Published var isUnlocked: Bool = false
+    @Published var autoBackgroundUnlock: Bool = true
+    @Published var statusText: String = "甇?????iBeacon ????..."
+    @Published var detectedInfo: String = "撠?菜葫?啁??颱縑璅?
+    @Published var eventLogs: [String] = []
+
+    override init() {
+        super.init()
+        setupNotifications()
+        setupBeaconMonitoring()
+
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+
+        centralManager = CBCentralManager(
+            delegate: self,
+            queue: nil,
+            options: [CBCentralManagerOptionRestoreIdentifierKey: restoreID]
+        )
+    }
+
+    private func setupBeaconMonitoring() {
+        locationManager.delegate = self
+        locationManager.requestAlwaysAuthorization()
+
+        let region = CLBeaconRegion(uuid: beaconUUID, identifier: "WinUnlockBeacon")
+        region.notifyOnEntry = true
+        region.notifyOnExit = true
+        region.notifyEntryStateOnDisplay = true
+        locationManager.startMonitoring(for: region)
+        locationManager.requestState(for: region)
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        if status == .authorizedAlways || status == .authorizedWhenInUse {
+            let region = CLBeaconRegion(uuid: beaconUUID, identifier: "WinUnlockBeacon")
+            region.notifyEntryStateOnDisplay = true
+            locationManager.startMonitoring(for: region)
+            locationManager.requestState(for: region)
+        }
+    }
+
+    // iPhone ?券?撅?摰??Ｗ?鈭株絲???芾???蝑 iBeacon 撠望?鋡怎′擃????
+    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        addLog("iBeacon 蝖祇???嚗脣蝑??蝭?嚗?)
+        triggerActiveWakeScan()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
+        if state == .inside {
+            addLog("iBeacon ??Ⅱ隤?雿蝑???????")
+            triggerActiveWakeScan()
+        }
+    }
+
+    private func triggerActiveWakeScan() {
+        guard centralManager.state == .poweredOn else { return }
+        guard !isConnecting, Date().timeIntervalSince(lastUnlockTime) > cooldownSeconds else { return }
+        // ??蝝?10 蝘??臬銵???嚗??喲??蜓??????FFF0 銝阡??
+        startScan(allowDuplicates: true)
+    }
+
+    private func addLog(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let entry = "[\(formatter.string(from: Date()))] \(message)"
+        DispatchQueue.main.async {
+            self.eventLogs.insert(entry, at: 0)
+            if self.eventLogs.count > 8 {
+                self.eventLogs.removeLast()
+            }
+        }
+    }
+
+    @objc private func appDidEnterBackground() {
+        addLog("?脣??嚗??荔?iBeacon 蝖祇???敺?銝?)
+        startScan(allowDuplicates: false)
+    }
+
+    @objc private func appWillEnterForeground() {
+        addLog("??璅∪?")
+        startScan(allowDuplicates: true)
+    }
+
+    private func setupNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+    }
+
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        addLog("CoreBluetooth ??????)
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
+           let first = peripherals.first {
+            self.targetPeripheral = first
+            first.delegate = self
+        }
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if central.state == .poweredOn {
+            let isForeground = UIApplication.shared.applicationState == .active
+            startScan(allowDuplicates: isForeground)
+        } else {
+            isScanning = false
+            statusText = "隢???iPhone ??隞亙??券?撅圾??
+        }
+    }
+
+    func startScan(allowDuplicates: Bool) {
+        guard centralManager.state == .poweredOn else { return }
+        centralManager.stopScan()
+        centralManager.scanForPeripherals(
+            withServices: [serviceUUID],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates]
+        )
+        DispatchQueue.main.async {
+            self.isScanning = true
+            self.statusText = "iBeacon + BLE ????賭葉"
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        let rssiVal = RSSI.intValue
+        guard rssiVal != 127 else { return }
+        self.lastDiscoveredPeripheral = peripheral
+
+        let isBackground = UIApplication.shared.applicationState != .active
+        let threshold = isBackground ? backgroundRssiThreshold : foregroundRssiThreshold
+
+        if !isBackground {
+            DispatchQueue.main.async {
+                self.detectedInfo = "撌脣皜砍蝑靽⊥?嚗???\(rssiVal) dBm嚗?
+            }
+        }
+
+        guard rssiVal >= threshold else { return }
+        guard !isConnecting, Date().timeIntervalSince(lastUnlockTime) > cooldownSeconds else { return }
+
+        addLog("\(isBackground ? "????" : "?")???蝑 (\(rssiVal) dBm)")
+        connectToPeripheral(peripheral)
+    }
+
+    func manualConnectAndUnlock() {
+        guard let p = lastDiscoveredPeripheral else {
+            DispatchQueue.main.async {
+                self.detectedInfo = "?桀?撠???啁??鳴?隢Ⅱ隤?衣垢撌脣??誨??
+            }
+            return
+        }
+        addLog("??閫貊???皜祈岫")
+        connectToPeripheral(p)
+    }
+
+    private func connectToPeripheral(_ peripheral: CBPeripheral) {
+        isConnecting = true
+        targetPeripheral = peripheral
+        peripheral.delegate = self
+        centralManager.stopScan()
+
+        DispatchQueue.main.async {
+            self.statusText = "甇??????Windows 蝑..."
+        }
+
+        connectTimeoutWorkItem?.cancel()
+        let timeoutItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isConnecting else { return }
+            self.addLog("????暹?嚗?蝵格???)
+            self.disconnectAndCooldown()
+        }
+        connectTimeoutWorkItem = timeoutItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: timeoutItem)
+
+        centralManager.connect(peripheral, options: nil)
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        connectTimeoutWorkItem?.cancel()
+        peripheral.discoverServices([serviceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        connectTimeoutWorkItem?.cancel()
+        addLog("???憭望?: \(error?.localizedDescription ?? "?芰??")")
+        resetAndRescan()
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        connectTimeoutWorkItem?.cancel()
+        resetAndRescan()
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard error == nil, let services = peripheral.services else {
+            disconnectAndCooldown()
+            return
+        }
+        for service in services where service.uuid == serviceUUID {
+            peripheral.discoverCharacteristics([tokenCharUUID], for: service)
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard error == nil, let chars = service.characteristics else {
+            disconnectAndCooldown()
+            return
+        }
+        for char in chars where char.uuid == tokenCharUUID {
+            self.tokenCharacteristic = char
+            DispatchQueue.main.async {
+                if self.autoBackgroundUnlock || UIApplication.shared.applicationState != .active {
+                    self.sendUnlockCommand()
+                } else {
+                    let gen = UIImpactFeedbackGenerator(style: .medium)
+                    gen.impactOccurred()
+                    self.isUnlocked = false
+                    self.showUnlockSheet = true
+                }
+            }
+        }
+    }
+
+    func sendUnlockCommand() {
+        guard let peripheral = targetPeripheral, let tokenChar = tokenCharacteristic else { return }
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let key = SymmetricKey(data: Data(secretKey.utf8))
+        let signature = HMAC<SHA256>.authenticationCode(for: Data(timestamp.utf8), using: key)
+        let hexSig = signature.map { String(format: "%02x", $0) }.joined()
+
+        let payload = "\(timestamp)|\(hexSig)"
+        if let payloadData = payload.data(using: .utf8) {
+            peripheral.writeValue(payloadData, for: tokenChar, type: .withResponse)
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            addLog("撖怠蝪賜?憭望?: \(error.localizedDescription)")
+            disconnectAndCooldown()
+            return
+        }
+        lastUnlockTime = Date()
+        addLog("撌脫??神?亙?撖圾?偷蝡?")
+        DispatchQueue.main.async {
+            let notifyGen = UINotificationFeedbackGenerator()
+            notifyGen.notificationOccurred(.success)
+            self.isUnlocked = true
+            self.statusText = "撌脫????蒂閫?? Windows 蝑"
+            self.sendUnlockedNotification()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                self.showUnlockSheet = false
+            }
+        }
+        disconnectAndCooldown()
+    }
+
+    private func sendUnlockedNotification() {
+        let content = UNMutableNotificationContent()
+        content.title = "Sean ??Windows 蝑"
+        content.body = "撌脣??嚗??航???蒂摰?摰閫??"
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: "WinUnlockSuccess", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+
+    private func disconnectAndCooldown() {
+        if let p = targetPeripheral {
+            centralManager.cancelPeripheralConnection(p)
+        }
+        resetAndRescan()
+    }
+
+    private func resetAndRescan() {
+        isConnecting = false
+        targetPeripheral = nil
+        tokenCharacteristic = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            let isForeground = UIApplication.shared.applicationState == .active
+            self.startScan(allowDuplicates: isForeground)
+        }
+    }
+}
+
+

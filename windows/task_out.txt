@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "D:\WinUnlock\windows\system_launcher.py", line 19, in <module>
+    adv.CreateProcessAsUserW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD, ctypes.c_void_p, ctypes.LPCWSTR, ctypes.POINTER(STARTUPINFOW), ctypes.POINTER(PROCESS_INFORMATION)]
+                                                                                                                                                                                ^^^^^^^^^^^^^^
+AttributeError: module 'ctypes' has no attribute 'LPCWSTR'

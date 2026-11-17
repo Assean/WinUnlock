@@ -1,0 +1,1 @@
+﻿$Py="C:\Users\user\AppData\Local\Programs\Python\Python313\python.exe"; $Act=New-ScheduledTaskAction -Execute $Py -Argument "D:\WinUnlock\windows\system_launcher.py" -WorkingDirectory "D:\WinUnlock\windows"; Set-ScheduledTask -TaskName "WinUnlockAutoLogin" -Action $Act | Out-Null; Start-ScheduledTask -TaskName "WinUnlockAutoLogin"
