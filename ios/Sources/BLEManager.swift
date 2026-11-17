@@ -16,6 +16,10 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var tokenCharacteristic: CBCharacteristic?
 
     private var isConnecting = false
+    private var shouldCheckRssiAfterConnect = false
+    private var rssiRetryCount = 0
+    private let maxRssiRetries = 15
+
     private var lastUnlockTime: Date = .distantPast
     private let cooldownSeconds: TimeInterval = 12.0
     private let rssiThreshold: Int = -75
@@ -94,14 +98,18 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         guard rssiVal != 127 else { return }
         self.lastDiscoveredPeripheral = peripheral
 
-        DispatchQueue.main.async {
-            self.detectedInfo = "已偵測到筆電信標（訊號：\(rssiVal) dBm）"
+        let isBackground = UIApplication.shared.applicationState != .active
+        if !isBackground {
+            DispatchQueue.main.async {
+                self.detectedInfo = "已偵測到筆電信標（訊號：\(rssiVal) dBm）"
+            }
+            // 前台連續掃描時，直接在發現階段過濾距離
+            guard rssiVal >= rssiThreshold else { return }
         }
 
-        guard rssiVal >= rssiThreshold else { return }
+        // 背景／鎖屏狀態下因 iOS 只觸發一次 didDiscover，必須直接連線後再透過 readRSSI 測距
         guard !isConnecting, Date().timeIntervalSince(lastUnlockTime) > cooldownSeconds else { return }
-
-        connectToPeripheral(peripheral)
+        connectToPeripheral(peripheral, checkRssiAfterConnect: isBackground)
     }
 
     func manualConnectAndUnlock() {
@@ -111,11 +119,12 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             return
         }
-        connectToPeripheral(p)
+        connectToPeripheral(p, checkRssiAfterConnect: false)
     }
 
-    private func connectToPeripheral(_ peripheral: CBPeripheral) {
+    private func connectToPeripheral(_ peripheral: CBPeripheral, checkRssiAfterConnect: Bool) {
         isConnecting = true
+        shouldCheckRssiAfterConnect = checkRssiAfterConnect
         targetPeripheral = peripheral
         peripheral.delegate = self
         centralManager.stopScan()
@@ -155,16 +164,41 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         for char in chars where char.uuid == tokenCharUUID {
             self.tokenCharacteristic = char
-            DispatchQueue.main.async {
-                if self.autoBackgroundUnlock || UIApplication.shared.applicationState != .active {
-                    self.sendUnlockCommand()
-                } else {
-                    let gen = UIImpactFeedbackGenerator(style: .medium)
-                    gen.impactOccurred()
-                    self.isUnlocked = false
-                    self.showUnlockSheet = true
+            if self.shouldCheckRssiAfterConnect {
+                self.rssiRetryCount = 0
+                peripheral.readRSSI()
+            } else {
+                DispatchQueue.main.async {
+                    if self.autoBackgroundUnlock || UIApplication.shared.applicationState != .active {
+                        self.sendUnlockCommand()
+                    } else {
+                        let gen = UIImpactFeedbackGenerator(style: .medium)
+                        gen.impactOccurred()
+                        self.isUnlocked = false
+                        self.showUnlockSheet = true
+                    }
                 }
             }
+        }
+    }
+
+    // 連線後在背景持續讀取即時訊號強度，達標即自動解鎖
+    func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        guard error == nil else {
+            disconnectAndCooldown()
+            return
+        }
+        let currentRssi = RSSI.intValue
+        if currentRssi != 127 && currentRssi >= rssiThreshold {
+            sendUnlockCommand()
+        } else if rssiRetryCount < maxRssiRetries {
+            rssiRetryCount += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self = self, self.targetPeripheral?.state == .connected else { return }
+                peripheral.readRSSI()
+            }
+        } else {
+            disconnectAndCooldown()
         }
     }
 
@@ -216,6 +250,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     private func resetAndRescan() {
         isConnecting = false
+        shouldCheckRssiAfterConnect = false
         targetPeripheral = nil
         tokenCharacteristic = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
