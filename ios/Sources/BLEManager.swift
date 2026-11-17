@@ -265,6 +265,11 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            addLog("寫入簽章失敗: \(error.localizedDescription)")
+            disconnectAndCooldown()
+            return
+        }
         lastUnlockTime = Date()
         addLog("已成功寫入加密解鎖簽章！")
         DispatchQueue.main.async {
@@ -307,3 +312,4 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
     }
 }
+
