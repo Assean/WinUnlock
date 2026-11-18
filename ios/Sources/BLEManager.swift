@@ -30,6 +30,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     @Published var isScanning: Bool = false
     @Published var showUnlockSheet: Bool = false
     @Published var isPreviewMode: Bool = false
+    private var isAuthenticatedForCurrentSession: Bool = false
     @Published var isUnlocked: Bool = false
     @Published var autoBackgroundUnlock: Bool = true
     @Published var statusText: String = "正在初始化 iBeacon 鎖屏感應..."
@@ -118,6 +119,18 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private func setupNotifications() {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
+        let unlockAction = UNNotificationAction(
+            identifier: "UNLOCK_PC_ACTION",
+            title: "Face ID / 密碼解鎖電腦",
+            options: [.authenticationRequired]
+        )
+        let category = UNNotificationCategory(
+            identifier: "WIN_UNLOCK_CATEGORY",
+            actions: [unlockAction],
+            intentIdentifiers: [],
+            options: []
+        )
+        center.setNotificationCategories([category])
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
 
@@ -247,6 +260,11 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         for char in chars where char.uuid == tokenCharUUID {
             self.tokenCharacteristic = char
             DispatchQueue.main.async {
+                if self.isAuthenticatedForCurrentSession {
+                    self.isAuthenticatedForCurrentSession = false
+                    self.sendUnlockCommand()
+                    return
+                }
                 let gen = UIImpactFeedbackGenerator(style: .medium)
                 gen.impactOccurred()
                 self.isUnlocked = false
@@ -309,8 +327,9 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         lastPromptNotificationTime = Date()
         let content = UNMutableNotificationContent()
         content.title = "Sean 的 Windows 筆電"
-        content.body = "偵測到筆電處於鎖定狀態，點此透過 Face ID 或密碼驗證解鎖"
+        content.body = "長按或下拉此通知，免開 App 直接以 Face ID / 密碼解鎖"
         content.sound = .default
+        content.categoryIdentifier = "WIN_UNLOCK_CATEGORY"
         if #available(iOS 15.0, *) {
             content.interruptionLevel = .timeSensitive
         }
@@ -319,6 +338,18 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.actionIdentifier == "UNLOCK_PC_ACTION" {
+            DispatchQueue.main.async {
+                self.isAuthenticatedForCurrentSession = true
+                if self.targetPeripheral?.state == .connected, self.tokenCharacteristic != nil {
+                    self.sendUnlockCommand()
+                } else {
+                    self.manualConnectAndUnlock()
+                }
+            }
+            completionHandler()
+            return
+        }
         DispatchQueue.main.async {
             if !self.isUnlocked {
                 self.showUnlockSheet = true
