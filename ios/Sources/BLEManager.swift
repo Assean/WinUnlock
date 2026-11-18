@@ -21,6 +21,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     private var isConnecting = false
     private var lastUnlockTime: Date = .distantPast
+    private var lastNotificationTime: Date = .distantPast
     private let cooldownSeconds: TimeInterval = 12.0
     private let foregroundRssiThreshold: Int = -75
     private let backgroundRssiThreshold: Int = -90
@@ -293,6 +294,8 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     private func sendUnlockedNotification() {
+        guard Date().timeIntervalSince(lastNotificationTime) > 30.0 else { return }
+        lastNotificationTime = Date()
         let content = UNMutableNotificationContent()
         content.title = "Sean 的 Windows 筆電"
         content.body = "已在鎖屏／背景自動感應並完成安全解鎖"
