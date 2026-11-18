@@ -1,4 +1,27 @@
-﻿windows/venv/
+﻿# Python & 虛擬環境
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
 
-windows/.pin_secret
-windows/winunlock.log
+# 本機加密 PIN 碼與執行日誌（嚴禁上傳至 GitHub）
+.pin_secret
+*.log
+
+# 除錯與體檢暫存檔
+windows/_*.ps1
+windows/audit_system.py
+windows/check_status.py
+windows/debug_bug.py
+windows/audit_report.txt
+windows/bug_report.txt
+windows/task_out.txt
+
+# iOS / Xcode 編譯產物與系統檔
+ios/build/
+DerivedData/
+*.ipa
+*.xcarchive
+.DS_Store
+Thumbs.db

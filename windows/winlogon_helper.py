@@ -35,6 +35,7 @@ user32.VkKeyScanW.restype = ctypes.c_short
 user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
 user32.MapVirtualKeyW.restype = wintypes.UINT
 kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
 crypt32.CryptUnprotectData.argtypes = [ctypes.POINTER(DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DATA_BLOB)]
 crypt32.CryptUnprotectData.restype = wintypes.BOOL
 
@@ -48,13 +49,11 @@ def get_pin() -> str:
     kernel32.LocalFree(b_out.pbData)
     return pin
 
-def send_vk(vk: int):
+def send_vk(vk: int, hold: float = 0.04):
     sc = user32.MapVirtualKeyW(vk, 0)
-    arr = (INPUT * 2)(
-        INPUT(type=1, union=_INPUTunion(ki=KEYBDINPUT(wVk=vk, wScan=sc, dwFlags=0))),
-        INPUT(type=1, union=_INPUTunion(ki=KEYBDINPUT(wVk=vk, wScan=sc, dwFlags=2)))
-    )
-    user32.SendInput(2, arr, ctypes.sizeof(INPUT))
+    user32.SendInput(1, ctypes.byref(INPUT(type=1, union=_INPUTunion(ki=KEYBDINPUT(wVk=vk, wScan=sc, dwFlags=0)))), ctypes.sizeof(INPUT))
+    time.sleep(hold)
+    user32.SendInput(1, ctypes.byref(INPUT(type=1, union=_INPUTunion(ki=KEYBDINPUT(wVk=vk, wScan=sc, dwFlags=2)))), ctypes.sizeof(INPUT))
 
 def send_pin_keys(pin: str):
     for ch in pin:
@@ -63,13 +62,13 @@ def send_pin_keys(pin: str):
         if shift:
             sc_sh = user32.MapVirtualKeyW(0x10, 0)
             user32.SendInput(1, ctypes.byref(INPUT(type=1, union=_INPUTunion(ki=KEYBDINPUT(wVk=0x10, wScan=sc_sh)))), ctypes.sizeof(INPUT))
-        send_vk(vk)
+        send_vk(vk, 0.03)
         if shift:
             sc_sh = user32.MapVirtualKeyW(0x10, 0)
             user32.SendInput(1, ctypes.byref(INPUT(type=1, union=_INPUTunion(ki=KEYBDINPUT(wVk=0x10, wScan=sc_sh, dwFlags=2)))), ctypes.sizeof(INPUT))
-        time.sleep(0.08)
+        time.sleep(0.06)
     time.sleep(0.25)
-    send_vk(0x0D)
+    send_vk(0x0D, 0.04)
 
 def attach_winlogon_desktop():
     h_desk = user32.OpenInputDesktop(0, False, 0x10000000) or user32.OpenInputDesktop(0, False, 0x01FF)
@@ -91,9 +90,8 @@ def unlock_winlogon() -> str:
 
     kernel32.SetThreadExecutionState(0x80000002)
     kernel32.SetThreadExecutionState(0x80000000)
-    mv = INPUT(type=0, union=_INPUTunion(mi=MOUSEINPUT(dx=2, dy=2, dwFlags=1)))
-    user32.SendInput(1, ctypes.byref(mv), ctypes.sizeof(INPUT))
-    time.sleep(0.9)
+    user32.SendInput(1, ctypes.byref(INPUT(type=0, union=_INPUTunion(mi=MOUSEINPUT(dx=3, dy=3, dwFlags=1)))), ctypes.sizeof(INPUT))
+    time.sleep(0.8)
 
     h_desk, desk_name, st = attach_winlogon_desktop()
     if not h_desk:
@@ -101,18 +99,18 @@ def unlock_winlogon() -> str:
     try:
         if "winlogon" not in desk_name.lower():
             return f"SKIP:ALREADY_UNLOCKED({desk_name})"
-        # 連續送出空白鍵確保掀開 Windows 11 鎖屏簾幕
-        send_vk(0x20)
-        time.sleep(0.4)
-        send_vk(0x20)
-        time.sleep(1.2)
+        # 在 Session 1 內送出空白鍵掀開 LockApp 鎖屏簾幕，等待 1.3 秒讓 PIN 框取得焦點
+        send_vk(0x20, 0.06)
+        time.sleep(1.3)
         send_pin_keys(pin)
         return f"OK:PIN_INJECTED(len={len(pin)})"
     finally:
         user32.CloseDesktop(h_desk)
 
 def serve():
-    logger.info("Winlogon helper v4 started on 127.0.0.1:58923")
+    sid = wintypes.DWORD()
+    kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(sid))
+    logger.info(f"Winlogon helper v7 started on 127.0.0.1:58923 (Session={sid.value})")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 58923))
