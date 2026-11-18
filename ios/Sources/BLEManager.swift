@@ -22,12 +22,14 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var isConnecting = false
     private var lastUnlockTime: Date = .distantPast
     private var lastNotificationTime: Date = .distantPast
+    private var lastPromptNotificationTime: Date = .distantPast
     private let cooldownSeconds: TimeInterval = 12.0
     private let foregroundRssiThreshold: Int = -75
     private let backgroundRssiThreshold: Int = -90
 
     @Published var isScanning: Bool = false
     @Published var showUnlockSheet: Bool = false
+    @Published var isPreviewMode: Bool = false
     @Published var isUnlocked: Bool = false
     @Published var autoBackgroundUnlock: Bool = true
     @Published var statusText: String = "正在初始化 iBeacon 鎖屏感應..."
@@ -245,13 +247,14 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         for char in chars where char.uuid == tokenCharUUID {
             self.tokenCharacteristic = char
             DispatchQueue.main.async {
-                if self.autoBackgroundUnlock || UIApplication.shared.applicationState != .active {
-                    self.sendUnlockCommand()
-                } else {
-                    let gen = UIImpactFeedbackGenerator(style: .medium)
-                    gen.impactOccurred()
-                    self.isUnlocked = false
-                    self.showUnlockSheet = true
+                let gen = UIImpactFeedbackGenerator(style: .medium)
+                gen.impactOccurred()
+                self.isUnlocked = false
+                self.isPreviewMode = false
+                self.statusText = "已連線筆電，等待 Face ID / 密碼驗證..."
+                self.showUnlockSheet = true
+                if UIApplication.shared.applicationState != .active {
+                    self.sendAuthPromptNotification()
                 }
             }
         }
@@ -291,6 +294,37 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
         }
         disconnectAndCooldown()
+    }
+
+    func cancelBiometricUnlock() {
+        showUnlockSheet = false
+        isPreviewMode = false
+        lastUnlockTime = Date()
+        statusText = "已取消本次解鎖驗證"
+        disconnectAndCooldown()
+    }
+
+    private func sendAuthPromptNotification() {
+        guard Date().timeIntervalSince(lastPromptNotificationTime) > 15.0 else { return }
+        lastPromptNotificationTime = Date()
+        let content = UNMutableNotificationContent()
+        content.title = "Sean 的 Windows 筆電"
+        content.body = "偵測到筆電處於鎖定狀態，點此透過 Face ID 或密碼驗證解鎖"
+        content.sound = .default
+        if #available(iOS 15.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
+        let req = UNNotificationRequest(identifier: "WinUnlockAuthPrompt", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async {
+            if !self.isUnlocked {
+                self.showUnlockSheet = true
+            }
+        }
+        completionHandler()
     }
 
     private func sendUnlockedNotification() {

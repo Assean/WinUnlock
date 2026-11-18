@@ -26,7 +26,7 @@ struct ContentView: View {
                         .padding(.top, 2)
                 }
 
-                Toggle("靠近時在背景／鎖屏全自動解鎖", isOn: $bleManager.autoBackgroundUnlock)
+                Toggle("偵測到筆電時強制生物辨識驗證", isOn: $bleManager.autoBackgroundUnlock)
                     .padding()
                     .background(Color(.secondarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -38,8 +38,9 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
 
-                    Button("預覽卡片") {
+                    Button("預覽驗證視窗") {
                         bleManager.isUnlocked = false
+                        bleManager.isPreviewMode = true
                         bleManager.showUnlockSheet = true
                     }
                     .buttonStyle(.bordered)
@@ -72,81 +73,31 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 24)
             }
+
+            if bleManager.showUnlockSheet {
+                GlassBiometricOverlay(
+                    isPresented: $bleManager.showUnlockSheet,
+                    deviceName: "Sean 的 Windows 筆電",
+                    onAuthenticated: {
+                        if bleManager.isPreviewMode {
+                            bleManager.isPreviewMode = false
+                            bleManager.isUnlocked = true
+                            bleManager.statusText = "Face ID / 密碼預覽驗證成功"
+                        } else {
+                            bleManager.sendUnlockCommand()
+                        }
+                    },
+                    onCancel: {
+                        if bleManager.isPreviewMode {
+                            bleManager.isPreviewMode = false
+                        } else {
+                            bleManager.cancelBiometricUnlock()
+                        }
+                    }
+                )
+                .zIndex(99)
+            }
         }
-        .sheet(isPresented: $bleManager.showUnlockSheet) {
-            AirPodsUnlockSheet()
-                .presentationDetents([.height(350)])
-                .presentationCornerRadius(36)
-                .presentationBackground(.ultraThinMaterial)
-                .presentationDragIndicator(.hidden)
-        }
-    }
-}
-
-struct AirPodsUnlockSheet: View {
-    @EnvironmentObject var bleManager: BLEManager
-    @State private var isPulsing = false
-
-    var body: some View {
-        VStack(spacing: 18) {
-            HStack {
-                Spacer()
-                Text("Sean 的 Windows 筆電")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button {
-                    bleManager.showUnlockSheet = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.secondary.opacity(0.6))
-                }
-            }
-            .padding(.top, 18)
-            .padding(.horizontal, 22)
-
-            Text(bleManager.isUnlocked ? "已通過安全驗證並解鎖" : "偵測到裝置靠近，點擊下方按鈕解鎖")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            ZStack {
-                Circle()
-                    .fill(bleManager.isUnlocked ? Color.green.opacity(0.15) : Color.blue.opacity(0.12))
-                    .frame(width: 115, height: 115)
-                    .scaleEffect(isPulsing ? 1.06 : 0.96)
-
-                Image(systemName: bleManager.isUnlocked ? "lock.open.laptopcomputer" : "laptopcomputer")
-                    .font(.system(size: 56, weight: .light))
-                    .foregroundStyle(bleManager.isUnlocked ? .green : .primary)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .onAppear {
-                withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
-                    isPulsing = true
-                }
-            }
-
-            Spacer()
-
-            Button {
-                bleManager.sendUnlockCommand()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: bleManager.isUnlocked ? "checkmark.circle.fill" : "faceid")
-                    Text(bleManager.isUnlocked ? "已解鎖" : "解鎖電腦")
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 52)
-                .background(bleManager.isUnlocked ? Color.green : Color.blue)
-                .foregroundColor(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .disabled(bleManager.isUnlocked)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 22)
-        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: bleManager.showUnlockSheet)
     }
 }
